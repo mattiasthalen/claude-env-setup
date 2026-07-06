@@ -88,14 +88,18 @@ uname_arch() {
   esac
 }
 
-# Latest release tag for owner/repo via api.github.com (allowlisted).
-# Uses GH_TOKEN if present to avoid unauthenticated rate limits.
+# Latest vX.Y.Z release tag for owner/repo, resolved over git rather than
+# api.github.com. In cloud environments the GitHub proxy authenticates git
+# operations, but unauthenticated api.github.com REST is rate-limited to 403
+# behind the shared egress IP — so `git ls-remote` is the reliable channel.
 latest_tag() { # latest_tag owner/repo
-  local hdr=()
-  [ -n "${GH_TOKEN:-}" ] && hdr=(-H "Authorization: Bearer ${GH_TOKEN}")
-  curl -fsSL "${hdr[@]}" "https://api.github.com/repos/$1/releases/latest" \
-    | grep -m1 '"tag_name"' \
-    | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+  local tag
+  tag="$(git ls-remote --tags --refs "https://github.com/$1" 'v*' \
+           | sed -E 's#.*refs/tags/##' \
+           | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+           | sort -V | tail -1)"
+  [ -n "$tag" ] || { warn "could not resolve latest release tag for $1"; return 1; }
+  printf '%s\n' "$tag"
 }
 
 # ---------------------------------------------------------------------------
@@ -229,8 +233,15 @@ install_duckdb() {
 install_databricks() {
   command -v databricks &>/dev/null && { log "databricks already installed"; return; }
   log "installing Databricks CLI (databricks)"
-  # Official installer; pulls the release from github.com. Writes /usr/local/bin.
-  curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+  # The official install.sh resolves the latest release via api.github.com,
+  # which 403s in cloud envs; fetch the release zip directly instead.
+  local arch tag ver
+  arch="$(uname_arch)" || { warn "unsupported arch $(uname -m) for databricks"; return 1; }
+  tag="$(latest_tag databricks/cli)"; ver="${tag#v}"
+  ensure_apt unzip
+  curl -fsSL "https://github.com/databricks/cli/releases/download/${tag}/databricks_cli_${ver}_linux_${arch}.zip" -o "$WORK/databricks.zip"
+  unzip -o -q "$WORK/databricks.zip" -d "$WORK/databricks"
+  install -m 0755 "$WORK/databricks/databricks" /usr/local/bin/databricks
   databricks --version
 }
 
