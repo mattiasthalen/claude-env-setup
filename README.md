@@ -65,8 +65,10 @@ Examples:
 
 Installing a CLI doesn't authenticate it. Set the relevant variables in the
 environment's **Environment variables** field (cloud icon → edit environment).
-Interactive logins (`az login`, `gcloud auth login`, SSO) aren't available in
-cloud sessions, so use tokens / service principals.
+Most interactive logins (`az login`, SSO) aren't available in cloud sessions,
+so use tokens / service principals. The exception is Google Cloud, which has no
+unattended file-free path — install the `bq` token and authenticate per session
+with [`/gcloud-login`](#google-cloud-gcloud-login) instead.
 
 | Tool | Environment variables |
 |---|---|
@@ -75,13 +77,13 @@ cloud sessions, so use tokens / service principals.
 | `acli` | `ATLASSIAN_SITE`, `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN` (then `acli jira auth login --token`) |
 | `kubectl` | `KUBECONFIG` (path to a kubeconfig you provide) |
 | `snow` | `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, and `SNOWFLAKE_PASSWORD` or `SNOWFLAKE_PRIVATE_KEY_RAW` |
-| `bq` / `gcloud` | `GOOGLE_APPLICATION_CREDENTIALS` (service-account key), `GOOGLE_CLOUD_PROJECT` |
+| `bq` / `gcloud` | none — run `/gcloud-login` per session (see below). Optional `GOOGLE_CLOUD_PROJECT` |
 | `fab` | `FAB_SPN_CLIENT_ID`, `FAB_SPN_CLIENT_SECRET`, `FAB_SPN_TENANT_ID` (or `FAB_TOKEN`) |
 | `databricks` | `DATABRICKS_HOST`, `DATABRICKS_TOKEN` |
 | `aws` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION` |
 | `terraform` | provider creds above; Terraform Cloud: `TF_TOKEN_app_terraform_io` |
 | `prefect` | `PREFECT_API_URL`, `PREFECT_API_KEY` (Prefect Cloud) |
-| `dataform` | `GOOGLE_APPLICATION_CREDENTIALS` (BigQuery) |
+| `dataform` | BigQuery via `/gcloud-login` (ADC), or `GOOGLE_APPLICATION_CREDENTIALS` if you provide a key file |
 | `duckdb` | none (optional MotherDuck: `motherduck_token`) |
 | `uv` | none |
 
@@ -89,6 +91,36 @@ cloud sessions, so use tokens / service principals.
 > setup script are stored in the environment configuration and are visible to
 > anyone who can edit that environment. There is no dedicated secrets store
 > yet — set credentials with that visibility in mind.
+
+### Google Cloud (`/gcloud-login`)
+
+Google Cloud is the one CLI that can't authenticate from an environment
+variable alone. `gcloud`/`bq` read credentials from a **file**, and environment
+variables aren't available to the setup script
+([anthropics/claude-code#63541](https://github.com/anthropics/claude-code/issues/63541)),
+so there's no unattended way to drop a service-account key into place — and no
+device-code flow like `az login --use-device-code`.
+
+Instead, the `bq` token installs a `/gcloud-login` command. Run it once per
+session:
+
+1. Type `/gcloud-login`. It prints a Google sign-in URL.
+2. Open the URL, approve access, copy the verification code back.
+3. Claude feeds the code to the login; Application Default Credentials (ADC)
+   are written for the session.
+
+After that, `bq`, `gsutil`, and Google client libraries authenticate as the
+signed-in user. Notes:
+
+- It's `application-default login` (ADC) — it authenticates the libraries and
+  `bq`/`gsutil`, not the bare `gcloud` command's own credential store.
+- Credentials live in the session filesystem and **don't persist** — re-run
+  `/gcloud-login` each session.
+- The login uses **your personal Google identity**; scope it to an account with
+  only the access you need.
+
+See [`docs/adr/0006-gcloud-auth-interactive-login.md`](docs/adr/0006-gcloud-auth-interactive-login.md)
+for the rationale and the alternatives that were ruled out.
 
 ## Network access
 
