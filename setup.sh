@@ -321,6 +321,181 @@ install_bq() {
   ln -sf /opt/google-cloud-sdk/bin/bq      /usr/local/bin/bq
   ln -sf /opt/google-cloud-sdk/bin/gsutil  /usr/local/bin/gsutil
   gcloud --version | head -1
+  install_gcloud_login_command
+}
+
+# ---------------------------------------------------------------------------
+# gcloud interactive-login helper + `/gcloud-login` command.
+#
+# Cloud sessions have no browser and no TTY to answer gcloud's verification-
+# code prompt, and environment variables are absent at setup time
+# (anthropics/claude-code#63541), so a service-account key cannot be
+# materialised at build time. Instead we ship an assistant-driven interactive
+# login: `gcloud auth application-default login` completed across turns via a
+# FIFO. See docs/adr/0006-gcloud-auth-interactive-login.md.
+# ---------------------------------------------------------------------------
+install_gcloud_login_command() {
+  log "installing gcloud-login helper + /gcloud-login command"
+  cat > /usr/local/bin/gcloud-login <<'GCLOUD_LOGIN_EOF'
+#!/usr/bin/env bash
+#
+# gcloud-login — drive an interactive gcloud ADC login inside a headless
+# Claude Code cloud session.
+#
+# Why this exists: cloud sessions have no browser and no TTY to answer
+# gcloud's verification-code prompt, and environment variables are not
+# available to the setup script (anthropics/claude-code#63541), so a
+# service-account key cannot be materialised at build time. This script lets
+# an assistant complete `gcloud auth application-default login` across turns:
+#
+#   gcloud-login start        launch the login; print the browser URL
+#   gcloud-login code <CODE>  feed the code from the browser to the login
+#   gcloud-login status       report whether ADC credentials are present
+#
+# The login process is detached and its stdin is a FIFO held open by a second
+# detached process, so gcloud keeps waiting for the code instead of crashing
+# with "EOF when reading a line" the moment the launching shell exits.
+#
+# See ~/.claude/commands/gcloud-login.md and
+# docs/adr/0006-gcloud-auth-interactive-login.md.
+set -euo pipefail
+
+STATE_DIR="${GCLOUD_LOGIN_STATE:-/tmp/gcloud-login}"
+PIPE="$STATE_DIR/pipe"
+OUT="$STATE_DIR/out"
+HOLDER_PID="$STATE_DIR/holder.pid"
+LOGIN_PID="$STATE_DIR/login.pid"
+ADC="${HOME}/.config/gcloud/application_default_credentials.json"
+
+die() { echo "gcloud-login: $*" >&2; exit 1; }
+
+# Each detached child is a process-group leader (setsid), so killing the
+# negative PID reaps the whole group — the holding sleeper, and gcloud's
+# python child along with its wrapper shell.
+cleanup() {
+  local f pid
+  for f in "$HOLDER_PID" "$LOGIN_PID"; do
+    [ -f "$f" ] || continue
+    pid="$(cat "$f" 2>/dev/null || true)"
+    [ -n "$pid" ] && kill -TERM "-$pid" 2>/dev/null || true
+  done
+  rm -f "$PIPE" "$HOLDER_PID" "$LOGIN_PID"
+}
+
+cmd_start() {
+  command -v gcloud >/dev/null 2>&1 || die "gcloud not found — install the 'bq' token"
+  cleanup 2>/dev/null || true
+  rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR"
+  mkfifo "$PIPE"
+
+  # Detached writer holds the FIFO's write end open so the login's blocking
+  # read never sees EOF while it waits for the verification code.
+  setsid bash -c "exec 9>'$PIPE'; echo \$\$ >'$HOLDER_PID'; exec sleep 3600" &
+  disown
+
+  # Detached login reads the code from the FIFO; capture all output.
+  setsid bash -c \
+    "gcloud auth application-default login --no-launch-browser <'$PIPE' >'$OUT' 2>&1" &
+  echo "$!" > "$LOGIN_PID"
+  disown
+
+  # Wait for the auth URL to appear.
+  local i url
+  for i in $(seq 1 40); do
+    url="$(grep -om1 'https://accounts.google.com[^ ]*' "$OUT" 2>/dev/null || true)"
+    [ -n "$url" ] && { printf '%s\n' "$url"; return 0; }
+    grep -qi 'error\|traceback' "$OUT" 2>/dev/null && { cat "$OUT"; cleanup; die "login failed to start"; }
+    sleep 0.5
+  done
+  cat "$OUT" 2>/dev/null || true
+  cleanup
+  die "login did not produce a URL within 20s"
+}
+
+cmd_code() {
+  [ -p "$PIPE" ] || die "no login in progress — run 'gcloud-login start' first"
+  [ -n "${1:-}" ] || die "usage: gcloud-login code <VERIFICATION_CODE>"
+  printf '%s\n' "$1" > "$PIPE"
+
+  local i
+  for i in $(seq 1 30); do
+    if grep -q 'Credentials saved to file' "$OUT" 2>/dev/null; then
+      cleanup
+      echo "ok: ADC credentials saved to $ADC"
+      return 0
+    fi
+    if grep -qi 'invalid_grant\|error\|traceback' "$OUT" 2>/dev/null; then
+      tail -3 "$OUT" 2>/dev/null
+      cleanup
+      die "login failed — the code may be wrong or expired; run 'gcloud-login start' again"
+    fi
+    sleep 0.5
+  done
+  tail -5 "$OUT" 2>/dev/null || true
+  die "login did not complete within 15s"
+}
+
+cmd_status() {
+  if [ -f "$ADC" ]; then
+    echo "ADC present: $ADC"
+  else
+    echo "no ADC credentials — run 'gcloud-login start'"
+    return 1
+  fi
+}
+
+case "${1:-}" in
+  start)  cmd_start ;;
+  code)   shift; cmd_code "${1:-}" ;;
+  status) cmd_status ;;
+  *) die "usage: gcloud-login {start|code <CODE>|status}" ;;
+esac
+GCLOUD_LOGIN_EOF
+  chmod +x /usr/local/bin/gcloud-login
+
+  mkdir -p "${HOME}/.claude/commands"
+  cat > "${HOME}/.claude/commands/gcloud-login.md" <<'GCLOUD_CMD_EOF'
+---
+description: Log in to Google Cloud (Application Default Credentials) interactively for this session. User-invoked only — do not trigger automatically.
+---
+
+## Launch
+
+!`gcloud-login start 2>&1`
+
+## Instructions
+
+The block above launched an interactive Google Cloud ADC login and, on success,
+printed an authorization URL beginning with `https://accounts.google.com/`. Drive
+the rest of the flow with the user:
+
+1. Give the user the URL as a clickable link. Ask them to open it, approve
+   access, and copy the **verification code** shown in the browser.
+2. When the user replies with the code, run it through the helper:
+
+   ```
+   gcloud-login code <THE_CODE>
+   ```
+
+3. Report the outcome:
+   - **Success** (`ok: ADC credentials saved`) — ADC is active for this session.
+     `bq`, `gsutil`, and Google client libraries now authenticate as the
+     signed-in user.
+   - **Failure** (bad or expired code) — offer to re-run `/gcloud-login` to
+     start over with a fresh URL.
+
+Notes:
+- This is `application-default login`: it authenticates **ADC** (used by `bq`,
+  `gsutil`, and client libraries), not the bare `gcloud` command's own
+  credential store.
+- Credentials live in the session filesystem and do **not** persist. Re-run
+  `/gcloud-login` at the start of each new session.
+- The login is your personal Google identity — scope it to an account with only
+  the access you need.
+- If the launch block above showed an error instead of a URL, gcloud is not
+  installed (the `bq` token was not selected when the environment was set up).
+GCLOUD_CMD_EOF
+  log "installed /gcloud-login command into ${HOME}/.claude/commands"
 }
 
 # ---------------------------------------------------------------------------
