@@ -29,7 +29,7 @@ session in that environment without reinstalling.
 
 | Token | Installs | Source |
 |---|---|---|
-| `matt-pocock` | Matt Pocock skills (engineering, productivity, in-progress) | copied into `~/.claude/skills` |
+| `matt-pocock` | Matt Pocock skills (all categories except deprecated, pinned to v1.1.0) | copied into `~/.claude/skills` |
 | `caveman` | Caveman | `claude plugin` (`caveman@caveman`) |
 | `superpowers` | Superpowers | `claude plugin` (`superpowers@claude-plugins-official`) |
 | `gh` | GitHub CLI | GitHub release |
