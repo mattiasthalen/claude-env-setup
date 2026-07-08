@@ -26,8 +26,9 @@ set -euo pipefail
 # Pins — leave "main"/"latest" to track upstream, or pin for reproducibility.
 # ---------------------------------------------------------------------------
 MATTPOCOCK_REPO="https://github.com/mattpocock/skills"
-MATTPOCOCK_REF="main"
-MATTPOCOCK_CATEGORIES=(engineering productivity in-progress)
+MATTPOCOCK_REF="v1.1.0"
+# Every category under skills/ is installed except the ones listed here.
+MATTPOCOCK_SKIP_CATEGORIES=(deprecated)
 
 # Caveman and Superpowers are Claude Code plugins, installed via the
 # `claude plugin` CLI (not copied) so their hooks/activation are wired.
@@ -124,15 +125,29 @@ copy_skill_dir() { # copy_skill_dir <dir containing SKILL.md>
 }
 
 install_matt_pocock() {
-  log "installing Matt Pocock skills"
-  local src cat d n=0
+  log "installing Matt Pocock skills ($MATTPOCOCK_REF)"
+  local src cat catname skip d n=0 manifest="$DEST/.matt-pocock-installed"
   src="$(clone_repo "$MATTPOCOCK_REPO" "$MATTPOCOCK_REF")"
   mkdir -p "$DEST"
-  for cat in "${MATTPOCOCK_CATEGORIES[@]}"; do
-    [ -d "$src/skills/$cat" ] || { warn "no category '$cat', skipping"; continue; }
-    for d in "$src/skills/$cat"/*/; do
+  # Prune skills recorded by a previous run, so upstream renames/removals
+  # don't leave stale copies behind. Only names we installed are touched.
+  if [ -f "$manifest" ]; then
+    local old
+    while IFS= read -r old; do
+      [ -n "$old" ] && rm -rf "${DEST:?}/$old"
+    done < "$manifest"
+  fi
+  : > "$manifest"
+  for cat in "$src"/skills/*/; do
+    catname="$(basename "$cat")"
+    for skip in "${MATTPOCOCK_SKIP_CATEGORIES[@]}"; do
+      [ "$catname" = "$skip" ] && continue 2
+    done
+    for d in "$cat"*/; do
       [ -f "${d}SKILL.md" ] || continue
-      copy_skill_dir "$d"; n=$((n + 1))
+      copy_skill_dir "$d"
+      basename "$d" >> "$manifest"
+      n=$((n + 1))
     done
   done
   log "installed $n Matt Pocock skills into $DEST"
