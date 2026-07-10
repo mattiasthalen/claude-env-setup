@@ -161,18 +161,14 @@ install_matt_pocock() {
 
 # ---------------------------------------------------------------------------
 # Dumb-zone guard — bundled with the matt-pocock Installable (see
-# docs/adr/0007). A PostToolUse hook that measures context occupancy after
-# every tool call and warns — user and Claude both — when a session
-# approaches (100k tokens) and enters (120k tokens) the dumb zone where
-# response quality degrades. The prescribed remedy is always a handoff via
-# the `handoff` skill installed by the same Installable, never compaction.
+# docs/adr/0007). The guard script's docstring below explains its behavior.
 # ---------------------------------------------------------------------------
 install_dumb_zone_guard() {
   log "installing dumb-zone guard hook"
   mkdir -p "$HOOKS_DEST"
   cat > "$HOOKS_DEST/dumb-zone-guard.py" <<'DUMB_ZONE_GUARD_EOF'
 #!/usr/bin/env python3
-"""Dumb-zone guard: a Claude Code PostToolUse hook that watches context size.
+"""Dumb-zone guard: a Claude Code PostToolUse hook.
 
 Sessions degrade well before the context window is full — the "dumb zone"
 starts around 120k tokens of context regardless of the window ceiling. After
@@ -256,27 +252,39 @@ def main():
 
     session = re.sub(r"[^A-Za-z0-9._-]", "_", str(event.get("session_id") or "unknown"))
     state_path = os.path.join(tempfile.gettempdir(), f"dumb-zone-guard-{session}.json")
+
+    # A malformed state file means silence, not an error — but the state is
+    # rewritten below, so the guard self-heals for later crossings. A missing
+    # file is just a fresh session.
+    crossed, state_ok = set(), True
     try:
         with open(state_path, encoding="utf-8") as f:
             crossed = set(json.load(f)["crossed"])
+    except FileNotFoundError:
+        pass
     except Exception:
-        crossed = set()
+        state_ok = False
 
-    now = {line for line in (APPROACHING, DUMB_ZONE) if tokens >= line}
+    exceeded = {line for line in (APPROACHING, DUMB_ZONE) if tokens >= line}
     try:
         with open(state_path, "w", encoding="utf-8") as f:
-            json.dump({"crossed": sorted(now)}, f)
+            json.dump({"crossed": sorted(exceeded)}, f)
     except OSError:
-        pass
+        # A crossing that can't be recorded would re-warn after every tool
+        # call past the line; edge-triggering demands silence instead.
+        state_ok = False
 
-    messages = warning(tokens, now - crossed)
+    if not state_ok:
+        return
+    messages = warning(tokens, exceeded - crossed)
     if messages:
+        user_msg, agent_msg = messages
         json.dump(
             {
-                "systemMessage": messages[0],
+                "systemMessage": user_msg,
                 "hookSpecificOutput": {
                     "hookEventName": "PostToolUse",
-                    "additionalContext": messages[1],
+                    "additionalContext": agent_msg,
                 },
             },
             sys.stdout,

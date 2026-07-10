@@ -41,6 +41,14 @@ assert() { # assert <description> <command...>
 # ---------------------------------------------------------------------------
 echo "== installer outcome =="
 
+# Explicit opt-in (ADR 0002): provisioning without the matt-pocock Token
+# installs no guard and changes nothing; an empty invocation fails loudly.
+RC=0
+bash "$REPO_ROOT/setup.sh" >/dev/null 2>&1 || RC=$?
+assert "no tokens: loud failure (exit 2)" test "$RC" -eq 2
+assert "no tokens: no guard installed, no settings touched" \
+  test ! -e "$CLAUDE_HOOKS_DEST" -a ! -e "$CLAUDE_SETTINGS_FILE"
+
 # Pre-existing user settings: unrelated keys and an unrelated hook that the
 # merge must preserve.
 cat > "$CLAUDE_SETTINGS_FILE" <<'EOF'
@@ -189,8 +197,11 @@ assert "corrupt transcript: silent success" test -z "$OUT"
 echo 'garbage' > "$TMPDIR/dumb-zone-guard-s4.json"
 write_transcript 105000
 run_guard s4
-assert "corrupt state file: guard still fires" \
-  jq -e '.systemMessage' <<<"$OUT"
+assert "corrupt state file: silent success" test -z "$OUT"
+write_transcript 125000
+run_guard s4
+assert "state self-heals after corruption: next crossing fires" \
+  jq -e '.systemMessage | startswith("🚨")' <<<"$OUT"
 
 RC=0
 OUT="$(python3 "$GUARD" </dev/null)" || RC=$?
