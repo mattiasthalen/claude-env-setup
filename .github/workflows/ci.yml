@@ -12,6 +12,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Syntax check (bash -n)
-        run: bash -n setup.sh
+        run: bash -n setup.sh tests/run.sh
       - name: ShellCheck
-        run: shellcheck setup.sh
+        run: shellcheck setup.sh tests/run.sh
+
+  behavioral:
+    name: behavioral tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install into a sandbox and drive the installed guard
+        run: bash tests/run.sh
