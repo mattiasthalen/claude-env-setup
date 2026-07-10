@@ -42,6 +42,11 @@ SUPERPOWERS_PLUGIN="superpowers@claude-plugins-official"
 # skills dir, which the setup script's cached filesystem preserves.
 DEST="${SKILLS_DEST:-${HOME}/.claude/skills}"
 
+# Where the dumb-zone guard hook and the user-level Claude Code settings live.
+# Overridable for testing, like SKILLS_DEST.
+HOOKS_DEST="${CLAUDE_HOOKS_DEST:-${HOME}/.claude/hooks}"
+SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-${HOME}/.claude/settings.json}"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -151,6 +156,168 @@ install_matt_pocock() {
     done
   done
   log "installed $n Matt Pocock skills into $DEST"
+  install_dumb_zone_guard
+}
+
+# ---------------------------------------------------------------------------
+# Dumb-zone guard — bundled with the matt-pocock Installable (see
+# docs/adr/0007). A PostToolUse hook that measures context occupancy after
+# every tool call and warns — user and Claude both — when a session
+# approaches (100k tokens) and enters (120k tokens) the dumb zone where
+# response quality degrades. The prescribed remedy is always a handoff via
+# the `handoff` skill installed by the same Installable, never compaction.
+# ---------------------------------------------------------------------------
+install_dumb_zone_guard() {
+  log "installing dumb-zone guard hook"
+  mkdir -p "$HOOKS_DEST"
+  cat > "$HOOKS_DEST/dumb-zone-guard.py" <<'DUMB_ZONE_GUARD_EOF'
+#!/usr/bin/env python3
+"""Dumb-zone guard: a Claude Code PostToolUse hook that watches context size.
+
+Sessions degrade well before the context window is full — the "dumb zone"
+starts around 120k tokens of context regardless of the window ceiling. After
+every tool call this hook reads the session transcript, measures current
+context occupancy, and warns twice: once approaching the zone (100k tokens)
+and once past it (120k). Each warning reaches both audiences at once: a
+systemMessage shown to the user (outside model context) and additionalContext
+injected for Claude. The remedy is always a handoff via the `handoff` skill
+installed alongside this guard — never compaction.
+
+Warnings are edge-triggered per session, tracked in a state file under the
+temp dir, and re-arm when usage falls back below a line. The guard must never
+break a session: any failure means silence and exit 0.
+"""
+import json
+import os
+import re
+import sys
+import tempfile
+
+APPROACHING = 100_000
+DUMB_ZONE = 120_000
+
+
+def context_tokens(transcript_path):
+    """Context occupancy: the most recent assistant message's usage, summed."""
+    usage = None
+    with open(transcript_path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or entry.get("type") != "assistant":
+                continue
+            message = entry.get("message")
+            if isinstance(message, dict) and isinstance(message.get("usage"), dict):
+                usage = message["usage"]
+    if usage is None:
+        return None
+    return sum(
+        int(usage.get(key) or 0)
+        for key in (
+            "input_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        )
+    )
+
+
+def warning(tokens, newly_crossed):
+    """(user message, Claude message) for the highest newly crossed line."""
+    n = tokens // 1000
+    if DUMB_ZONE in newly_crossed:
+        return (
+            f"\U0001f6a8 Context ~{n}k tokens — past the dumb zone (120k). "
+            "Wrap up and run /handoff to continue in a fresh session.",
+            "Context has passed 120k tokens — you are in the dumb zone and "
+            "response quality is degraded. Do not start new work. Finish or "
+            "checkpoint the current step, then invoke the handoff skill to "
+            "produce a handoff document so the user can continue in a fresh "
+            "session. Never suggest compacting.",
+        )
+    if APPROACHING in newly_crossed:
+        return (
+            f"⚠ Context ~{n}k tokens — approaching the dumb zone (120k). "
+            f"~{120 - n}k of runway: steer toward a handoff point.",
+            f"Context has reached ~{n}k tokens, approaching the dumb zone at "
+            "120k where response quality degrades. Prefer completing in-flight "
+            "work over starting new subtasks, and steer toward a natural "
+            "handoff point.",
+        )
+    return None
+
+
+def main():
+    event = json.load(sys.stdin)
+    tokens = context_tokens(event["transcript_path"])
+    if tokens is None:
+        return
+
+    session = re.sub(r"[^A-Za-z0-9._-]", "_", str(event.get("session_id") or "unknown"))
+    state_path = os.path.join(tempfile.gettempdir(), f"dumb-zone-guard-{session}.json")
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            crossed = set(json.load(f)["crossed"])
+    except Exception:
+        crossed = set()
+
+    now = {line for line in (APPROACHING, DUMB_ZONE) if tokens >= line}
+    try:
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"crossed": sorted(now)}, f)
+    except OSError:
+        pass
+
+    messages = warning(tokens, now - crossed)
+    if messages:
+        json.dump(
+            {
+                "systemMessage": messages[0],
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": messages[1],
+                },
+            },
+            sys.stdout,
+        )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass
+    sys.exit(0)
+DUMB_ZONE_GUARD_EOF
+  chmod +x "$HOOKS_DEST/dumb-zone-guard.py"
+
+  # Merge the PostToolUse registration into the user-level settings,
+  # preserving unrelated keys and other hooks; re-runs do not duplicate it.
+  # A malformed settings file aborts the install (fail-hard, ADR 0003).
+  python3 - "$SETTINGS_FILE" "python3 $HOOKS_DEST/dumb-zone-guard.py" <<'MERGE_EOF'
+import json, os, sys
+
+settings_path, command = sys.argv[1], sys.argv[2]
+try:
+    with open(settings_path, encoding="utf-8") as f:
+        settings = json.load(f)
+except FileNotFoundError:
+    settings = {}
+
+entries = settings.setdefault("hooks", {}).setdefault("PostToolUse", [])
+if not any(
+    hook.get("command") == command
+    for entry in entries
+    for hook in entry.get("hooks", [])
+):
+    entries.append({"matcher": "*", "hooks": [{"type": "command", "command": command}]})
+    os.makedirs(os.path.dirname(settings_path) or ".", exist_ok=True)
+    with open(settings_path, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+        f.write("\n")
+MERGE_EOF
+  log "registered dumb-zone PostToolUse hook in $SETTINGS_FILE"
 }
 
 # Caveman and Superpowers ship as Claude Code plugins. Install them through

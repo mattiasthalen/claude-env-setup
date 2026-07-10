@@ -29,7 +29,7 @@ session in that environment without reinstalling.
 
 | Token | Installs | Source |
 |---|---|---|
-| `matt-pocock` | Matt Pocock skills (all categories except deprecated, pinned to v1.1.0) | copied into `~/.claude/skills` |
+| `matt-pocock` | Matt Pocock skills (all categories except deprecated, pinned to v1.1.0) + dumb-zone context-warning hooks | skills copied into `~/.claude/skills`; guard hook into `~/.claude/hooks` |
 | `caveman` | Caveman | `claude plugin` (`caveman@caveman`) |
 | `superpowers` | Superpowers | `claude plugin` (`superpowers@claude-plugins-official`) |
 | `gh` | GitHub CLI | GitHub release |
@@ -147,6 +147,14 @@ acli.atlassian.com
 - **Plugins need the `claude` CLI.** `caveman` and `superpowers` install
   through `claude plugin …`, which must be available during setup-script
   execution.
+- **Dumb-zone guard (with `matt-pocock`).** The `matt-pocock` token also
+  installs a PostToolUse hook that warns — you and Claude both — when a
+  session's context approaches (100k tokens) and enters (120k tokens) the
+  dumb zone where response quality degrades. The prescribed remedy is a
+  handoff via the bundled `handoff` skill (`/handoff`), never compaction.
+  Its registration is merged into `~/.claude/settings.json`, preserving any
+  hooks and settings already there. See
+  [`docs/adr/0007`](docs/adr/0007-dumb-zone-guard-bundled-into-matt-pocock.md).
 
 See [`docs/adr/`](docs/adr/) for the rationale behind these decisions and
 [`CONTEXT.md`](CONTEXT.md) for the vocabulary.

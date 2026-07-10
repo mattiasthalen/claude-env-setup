@@ -35,3 +35,22 @@ _Avoid_: startup hook, init script.
 Describes an install path that fetches only from hosts on the environment's
 default Trusted network allowlist, so it works without widening network access.
 _Avoid_: whitelisted, sandbox-safe.
+
+**Dumb zone**:
+The region of a Claude Code session past ~120k tokens of context where
+response quality degrades, regardless of the model's window ceiling
+(Matt Pocock's observation). An absolute token count, not a window
+percentage.
+_Avoid_: context limit, window full.
+
+**Handoff**:
+Ending the current session by producing a handoff document for a fresh
+session to continue from, via Matt Pocock's `handoff` skill. The prescribed
+remedy for the dumb zone — never compaction.
+_Avoid_: compact, summarize.
+
+**Guard**:
+The dumb-zone warning hook bundled into the `matt-pocock` Installable. Warns
+the user and Claude when a session approaches (100k tokens) and enters
+(120k tokens) the dumb zone, and prescribes a handoff.
+_Avoid_: monitor, watcher.
